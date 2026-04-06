@@ -19,9 +19,9 @@ PARIS_TZ = pytz.timezone("Europe/Paris")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-last_alert_level = None
+last_alert_level_etf = None
+last_btc_alert = None  # Dernier seuil BTC déclenché
 
-# Quantités crypto fixes (Coinbase)
 CRYPTO_HOLDINGS = {
     "bitcoin": 0.00094,
     "ethereum": 0.01075,
@@ -41,6 +41,22 @@ CRYPTO_SYMBOLS = {
     "litecoin": "LTC",
     "cardano": "ADA",
 }
+
+# Seuils alertes BTC (en euros)
+BTC_ALERT_LEVELS = [
+    {
+        "price": 50000,
+        "label": "📉 BTC sous 50 000€",
+        "action": "Opportunité modérée — envisager 50€",
+        "emoji": "📉"
+    },
+    {
+        "price": 40000,
+        "label": "🔥 BTC sous 40 000€",
+        "action": "Opportunité forte — envisager 100€",
+        "emoji": "🔥"
+    },
+]
 
 
 # ─── JSONBin ──────────────────────────────────────────────────────────────────
@@ -107,7 +123,7 @@ def get_etf_price():
         return None, None
 
 
-# ─── Prix Crypto (CoinGecko) ──────────────────────────────────────────────────
+# ─── Prix Crypto ──────────────────────────────────────────────────────────────
 
 def get_crypto_prices():
     try:
@@ -120,6 +136,18 @@ def get_crypto_prices():
     except Exception as e:
         logger.error(f"Erreur prix crypto: {e}")
         return {}
+
+def get_btc_price():
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=eur&include_24hr_change=true",
+            timeout=10
+        )
+        data = r.json().get("bitcoin", {})
+        return data.get("eur"), data.get("eur_24h_change")
+    except Exception as e:
+        logger.error(f"Erreur prix BTC: {e}")
+        return None, None
 
 def calcul_crypto(prices):
     total = 0
@@ -138,9 +166,9 @@ def calcul_crypto(prices):
     return round(total, 2), sorted(details, key=lambda x: x["valeur"], reverse=True)
 
 
-# ─── Alertes ──────────────────────────────────────────────────────────────────
+# ─── Niveaux d'alerte ─────────────────────────────────────────────────────────
 
-def get_alert_level(pct):
+def get_alert_level_etf(pct):
     if pct <= -20:
         return 4, "🔥 EXCELLENTE OPPORTUNITÉ", "Opportunité majeure — agir si liquidités disponibles"
     elif pct <= -15:
@@ -150,6 +178,14 @@ def get_alert_level(pct):
     elif pct <= -5:
         return 1, "📉 Légère baisse", "Surveiller — pas d'urgence"
     return 0, None, None
+
+def get_btc_alert_level(btc_price):
+    """Retourne le niveau d'alerte BTC selon le prix actuel."""
+    triggered = None
+    for level in BTC_ALERT_LEVELS:
+        if btc_price <= level["price"]:
+            triggered = level
+    return triggered
 
 def days_until_next_month():
     now = datetime.now(PARIS_TZ)
@@ -163,35 +199,59 @@ def days_until_next_month():
 # ─── Jobs automatiques ────────────────────────────────────────────────────────
 
 async def check_price(context: ContextTypes.DEFAULT_TYPE):
-    global last_alert_level
+    global last_alert_level_etf, last_btc_alert
+
+    # ── Vérification ETF ──
     data = load_data()
     total_parts, _, pru = calcul_portefeuille(data)
-    if total_parts == 0:
-        return
-    price, _ = get_etf_price()
-    if price is None:
-        return
-    pct = round(((price - pru) / pru) * 100, 2)
-    level, label, action = get_alert_level(pct)
-    if level > 0 and (last_alert_level is None or level > last_alert_level):
-        msg = (
-            f"{label}\n\n"
-            f"📊 *Amundi PEA Monde*\n"
-            f"Prix actuel : *{price}€*\n"
-            f"Prix de revient : {pru}€\n"
-            f"Variation : *{pct:+.2f}%*\n\n"
-            f"💡 {action}\n\n"
-            f"_Continue ton DCA mensuel quoi qu'il arrive._"
-        )
-        await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-        last_alert_level = level
-    elif level == 0 and last_alert_level and last_alert_level > 0:
-        last_alert_level = None
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"✅ *Rebond détecté*\n\nPrix : *{price}€*\nVariation : *{pct:+.2f}%*\nRepassé au-dessus du seuil.",
-            parse_mode="Markdown"
-        )
+    if total_parts > 0:
+        price, _ = get_etf_price()
+        if price is not None:
+            pct = round(((price - pru) / pru) * 100, 2)
+            level, label, action = get_alert_level_etf(pct)
+            if level > 0 and (last_alert_level_etf is None or level > last_alert_level_etf):
+                msg = (
+                    f"{label}\n\n"
+                    f"📊 *Amundi PEA Monde*\n"
+                    f"Prix actuel : *{price}€*\n"
+                    f"Prix de revient : {pru}€\n"
+                    f"Variation : *{pct:+.2f}%*\n\n"
+                    f"💡 {action}\n\n"
+                    f"_Continue ton DCA mensuel quoi qu'il arrive._"
+                )
+                await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+                last_alert_level_etf = level
+            elif level == 0 and last_alert_level_etf and last_alert_level_etf > 0:
+                last_alert_level_etf = None
+                await context.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"✅ *ETF — Rebond détecté*\n\nPrix : *{price}€*\nVariation : *{pct:+.2f}%*",
+                    parse_mode="Markdown"
+                )
+
+    # ── Vérification BTC ──
+    btc_price, btc_change = get_btc_price()
+    if btc_price is not None:
+        alert = get_btc_alert_level(btc_price)
+        alert_key = alert["price"] if alert else None
+
+        if alert and (last_btc_alert is None or alert_key < last_btc_alert):
+            msg = (
+                f"{alert['emoji']} *{alert['label']}*\n\n"
+                f"Prix Bitcoin : *{btc_price:,.0f}€*\n"
+                f"Variation 24h : {btc_change:+.2f}%\n\n"
+                f"💡 {alert['action']}\n\n"
+                f"_Rappel : le BTC est volatil. N'investis que ce que tu peux te permettre de perdre._"
+            )
+            await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+            last_btc_alert = alert_key
+        elif alert is None and last_btc_alert is not None:
+            last_btc_alert = None
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"✅ *BTC — Rebond au-dessus de 50 000€*\n\nPrix actuel : *{btc_price:,.0f}€*",
+                parse_mode="Markdown"
+            )
 
 async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
@@ -200,23 +260,20 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     crypto_prices = get_crypto_prices()
     crypto_total, _ = calcul_crypto(crypto_prices)
     livreta = data.get("livreta", 0)
-
     if price is None or total_parts == 0:
         return
-
     valeur_pea = round(price * total_parts, 2)
     pv_pea = round(valeur_pea - total_investi, 2)
     pct_pea = round(((price - pru) / pru) * 100, 2)
     total_patrimoine = round(valeur_pea + livreta + crypto_total, 2)
     emoji = "📈" if pct_pea >= 0 else "📉"
-
     msg = (
         f"📋 *Résumé hebdomadaire — {datetime.now(PARIS_TZ).strftime('%d/%m/%Y')}*\n\n"
-        f"{emoji} *PEA : {valeur_pea}€*\n"
-        f"Variation PRU : *{pct_pea:+.2f}%* | PV : *{pv_pea:+.2f}€*\n\n"
+        f"{emoji} *PEA : {valeur_pea}€* ({pct_pea:+.2f}%)\n"
+        f"Plus-value latente : *{pv_pea:+.2f}€*\n\n"
         f"🏦 *Livret A : {livreta}€*\n\n"
         f"₿ *Cryptos : {crypto_total}€*\n\n"
-        f"─────────────────\n"
+        f"━━━━━━━━━━━━━━━━━\n"
         f"💰 *TOTAL : {total_patrimoine}€*\n\n"
         f"_Prochain versement PEA dans ~{days_until_next_month()} jours_"
     )
@@ -233,7 +290,7 @@ async def cmd_cours(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Impossible de récupérer le cours.")
         return
     pct = round(((price - pru) / pru) * 100, 2) if pru else 0
-    level, label, action = get_alert_level(pct)
+    level, label, action = get_alert_level_etf(pct)
     emoji = "📈" if pct >= 0 else "📉"
     msg = (
         f"{emoji} *Amundi PEA Monde*\n\n"
@@ -269,29 +326,23 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_patrimoine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Récupération des prix en cours...")
-
     data = load_data()
     total_parts, total_investi, pru = calcul_portefeuille(data)
-    price, change_1d = get_etf_price()
+    price, _ = get_etf_price()
     crypto_prices = get_crypto_prices()
     crypto_total, crypto_details = calcul_crypto(crypto_prices)
     livreta = data.get("livreta", 0)
-
     if price is None:
         await update.message.reply_text("❌ Impossible de récupérer les prix.")
         return
-
     valeur_pea = round(price * total_parts, 2)
     pv_pea = round(valeur_pea - total_investi, 2)
     pct_pea = round(((price - pru) / pru) * 100, 2) if pru else 0
     total_patrimoine = round(valeur_pea + livreta + crypto_total, 2)
     emoji_pea = "📈" if pct_pea >= 0 else "📉"
-
-    # Ligne cryptos
     crypto_lines = ""
     for c in crypto_details:
         crypto_lines += f"  • {c['symbol']} : {c['valeur']}€\n"
-
     msg = (
         f"💰 *TON PATRIMOINE — {datetime.now(PARIS_TZ).strftime('%d/%m/%Y')}*\n\n"
         f"📈 *PEA Boursorama*\n"
@@ -377,9 +428,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✏️ *Mettre à jour*\n"
         "/achat <parts> <prix> — Enregistrer un achat ETF\n"
         "/livreta <montant> — Mettre à jour le Livret A\n\n"
-        f"_Seuil d'alerte ETF : {ALERT_THRESHOLD}%_\n"
-        "_Vérification auto : toutes les heures_\n"
-        "_Résumé : chaque lundi à 8h_"
+        "🔔 *Alertes automatiques*\n"
+        f"ETF : notification si baisse ≥ {ALERT_THRESHOLD}% du PRU\n"
+        "BTC : notification si prix < 50 000€ ou < 40 000€\n\n"
+        "_Vérification auto toutes les heures_\n"
+        "_Résumé chaque lundi à 8h_"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
