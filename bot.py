@@ -3,7 +3,6 @@ import logging
 import requests
 from datetime import datetime, time
 import pytz
-import yfinance as yf
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -13,14 +12,13 @@ CHAT_ID = int(os.environ.get("CHAT_ID"))
 ALERT_THRESHOLD = float(os.environ.get("ALERT_THRESHOLD", "-10"))
 JSONBIN_KEY = os.environ.get("JSONBIN_KEY")
 JSONBIN_BIN_ID = os.environ.get("JSONBIN_BIN_ID")
-ETF_TICKER = "DCAM.PA"
 PARIS_TZ = pytz.timezone("Europe/Paris")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 last_alert_level_etf = None
-last_btc_alert = None  # Dernier seuil BTC déclenché
+last_btc_alert = None
 
 CRYPTO_HOLDINGS = {
     "bitcoin": 0.00094,
@@ -42,20 +40,9 @@ CRYPTO_SYMBOLS = {
     "cardano": "ADA",
 }
 
-# Seuils alertes BTC (en euros)
 BTC_ALERT_LEVELS = [
-    {
-        "price": 50000,
-        "label": "📉 BTC sous 50 000€",
-        "action": "Opportunité modérée — envisager 50€",
-        "emoji": "📉"
-    },
-    {
-        "price": 40000,
-        "label": "🔥 BTC sous 40 000€",
-        "action": "Opportunité forte — envisager 100€",
-        "emoji": "🔥"
-    },
+    {"price": 50000, "label": "📉 BTC sous 50 000€", "action": "Opportunité modérée — envisager 50€"},
+    {"price": 40000, "label": "🔥 BTC sous 40 000€", "action": "Opportunité forte — envisager 100€"},
 ]
 
 
@@ -106,16 +93,25 @@ def calcul_portefeuille(data):
     return total_parts, total_investi, pru
 
 
-# ─── Prix ETF ─────────────────────────────────────────────────────────────────
+# ─── Prix ETF via Yahoo Finance Chart API ────────────────────────────────────
 
 def get_etf_price():
+    """Récupère le cours via l'API Chart de Yahoo Finance — plus fiable depuis les serveurs cloud."""
     try:
-        ticker = yf.Ticker(ETF_TICKER)
-        hist = ticker.history(period="5d")
-        if hist.empty:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/DCAM.PA"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        }
+        params = {"interval": "1d", "range": "5d"}
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        data = r.json()
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        if len(closes) < 1:
             return None, None
-        price = round(float(hist["Close"].iloc[-1]), 4)
-        prev = round(float(hist["Close"].iloc[-2]), 4) if len(hist) > 1 else price
+        price = round(closes[-1], 4)
+        prev = round(closes[-2], 4) if len(closes) > 1 else price
         change_1d = round(((price - prev) / prev) * 100, 2)
         return price, change_1d
     except Exception as e:
@@ -134,7 +130,7 @@ def get_crypto_prices():
         )
         return r.json()
     except Exception as e:
-        logger.error(f"Erreur prix crypto: {e}")
+        logger.error(f"Erreur crypto: {e}")
         return {}
 
 def get_btc_price():
@@ -146,7 +142,7 @@ def get_btc_price():
         data = r.json().get("bitcoin", {})
         return data.get("eur"), data.get("eur_24h_change")
     except Exception as e:
-        logger.error(f"Erreur prix BTC: {e}")
+        logger.error(f"Erreur BTC: {e}")
         return None, None
 
 def calcul_crypto(prices):
@@ -157,16 +153,11 @@ def calcul_crypto(prices):
         valeur = round(qty * price, 2)
         total += valeur
         if valeur >= 0.5:
-            details.append({
-                "symbol": CRYPTO_SYMBOLS[coin_id],
-                "qty": qty,
-                "price": price,
-                "valeur": valeur
-            })
+            details.append({"symbol": CRYPTO_SYMBOLS[coin_id], "valeur": valeur})
     return round(total, 2), sorted(details, key=lambda x: x["valeur"], reverse=True)
 
 
-# ─── Niveaux d'alerte ─────────────────────────────────────────────────────────
+# ─── Alertes ──────────────────────────────────────────────────────────────────
 
 def get_alert_level_etf(pct):
     if pct <= -20:
@@ -180,7 +171,6 @@ def get_alert_level_etf(pct):
     return 0, None, None
 
 def get_btc_alert_level(btc_price):
-    """Retourne le niveau d'alerte BTC selon le prix actuel."""
     triggered = None
     for level in BTC_ALERT_LEVELS:
         if btc_price <= level["price"]:
@@ -201,7 +191,6 @@ def days_until_next_month():
 async def check_price(context: ContextTypes.DEFAULT_TYPE):
     global last_alert_level_etf, last_btc_alert
 
-    # ── Vérification ETF ──
     data = load_data()
     total_parts, _, pru = calcul_portefeuille(data)
     if total_parts > 0:
@@ -210,48 +199,30 @@ async def check_price(context: ContextTypes.DEFAULT_TYPE):
             pct = round(((price - pru) / pru) * 100, 2)
             level, label, action = get_alert_level_etf(pct)
             if level > 0 and (last_alert_level_etf is None or level > last_alert_level_etf):
-                msg = (
-                    f"{label}\n\n"
-                    f"📊 *Amundi PEA Monde*\n"
-                    f"Prix actuel : *{price}€*\n"
-                    f"Prix de revient : {pru}€\n"
-                    f"Variation : *{pct:+.2f}%*\n\n"
-                    f"💡 {action}\n\n"
-                    f"_Continue ton DCA mensuel quoi qu'il arrive._"
+                await context.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"{label}\n\n📊 *Amundi PEA Monde*\nPrix : *{price}€*\nPRU : {pru}€\nVariation : *{pct:+.2f}%*\n\n💡 {action}\n\n_Continue ton DCA quoi qu'il arrive._",
+                    parse_mode="Markdown"
                 )
-                await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
                 last_alert_level_etf = level
             elif level == 0 and last_alert_level_etf and last_alert_level_etf > 0:
                 last_alert_level_etf = None
-                await context.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=f"✅ *ETF — Rebond détecté*\n\nPrix : *{price}€*\nVariation : *{pct:+.2f}%*",
-                    parse_mode="Markdown"
-                )
+                await context.bot.send_message(chat_id=CHAT_ID, text=f"✅ *ETF rebond*\nPrix : *{price}€* | Variation : *{pct:+.2f}%*", parse_mode="Markdown")
 
-    # ── Vérification BTC ──
     btc_price, btc_change = get_btc_price()
     if btc_price is not None:
         alert = get_btc_alert_level(btc_price)
         alert_key = alert["price"] if alert else None
-
         if alert and (last_btc_alert is None or alert_key < last_btc_alert):
-            msg = (
-                f"{alert['emoji']} *{alert['label']}*\n\n"
-                f"Prix Bitcoin : *{btc_price:,.0f}€*\n"
-                f"Variation 24h : {btc_change:+.2f}%\n\n"
-                f"💡 {alert['action']}\n\n"
-                f"_Rappel : le BTC est volatil. N'investis que ce que tu peux te permettre de perdre._"
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"*{alert['label']}*\n\nPrix BTC : *{btc_price:,.0f}€*\nVariation 24h : {btc_change:+.2f}%\n\n💡 {alert['action']}\n\n_N'investis que ce que tu peux perdre._",
+                parse_mode="Markdown"
             )
-            await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
             last_btc_alert = alert_key
         elif alert is None and last_btc_alert is not None:
             last_btc_alert = None
-            await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"✅ *BTC — Rebond au-dessus de 50 000€*\n\nPrix actuel : *{btc_price:,.0f}€*",
-                parse_mode="Markdown"
-            )
+            await context.bot.send_message(chat_id=CHAT_ID, text=f"✅ *BTC rebond*\nPrix : *{btc_price:,.0f}€*", parse_mode="Markdown")
 
 async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
@@ -267,17 +238,18 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     pct_pea = round(((price - pru) / pru) * 100, 2)
     total_patrimoine = round(valeur_pea + livreta + crypto_total, 2)
     emoji = "📈" if pct_pea >= 0 else "📉"
-    msg = (
-        f"📋 *Résumé hebdomadaire — {datetime.now(PARIS_TZ).strftime('%d/%m/%Y')}*\n\n"
-        f"{emoji} *PEA : {valeur_pea}€* ({pct_pea:+.2f}%)\n"
-        f"Plus-value latente : *{pv_pea:+.2f}€*\n\n"
-        f"🏦 *Livret A : {livreta}€*\n\n"
-        f"₿ *Cryptos : {crypto_total}€*\n\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"💰 *TOTAL : {total_patrimoine}€*\n\n"
-        f"_Prochain versement PEA dans ~{days_until_next_month()} jours_"
+    await context.bot.send_message(
+        chat_id=CHAT_ID,
+        text=(
+            f"📋 *Résumé hebdomadaire — {datetime.now(PARIS_TZ).strftime('%d/%m/%Y')}*\n\n"
+            f"{emoji} *PEA : {valeur_pea}€* ({pct_pea:+.2f}%)\nPV latente : *{pv_pea:+.2f}€*\n\n"
+            f"🏦 *Livret A : {livreta}€*\n\n"
+            f"₿ *Cryptos : {crypto_total}€*\n\n"
+            f"━━━━━━━━━━━━━━━━━\n💰 *TOTAL : {total_patrimoine}€*\n\n"
+            f"_Prochain versement dans ~{days_until_next_month()} jours_"
+        ),
+        parse_mode="Markdown"
     )
-    await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
 
 
 # ─── Commandes ────────────────────────────────────────────────────────────────
@@ -287,17 +259,12 @@ async def cmd_cours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, _, pru = calcul_portefeuille(data)
     price, change_1d = get_etf_price()
     if price is None:
-        await update.message.reply_text("❌ Impossible de récupérer le cours.")
+        await update.message.reply_text("❌ Cours indisponible pour l'instant (marché fermé ou API indisponible).")
         return
     pct = round(((price - pru) / pru) * 100, 2) if pru else 0
     level, label, action = get_alert_level_etf(pct)
     emoji = "📈" if pct >= 0 else "📉"
-    msg = (
-        f"{emoji} *Amundi PEA Monde*\n\n"
-        f"Prix : *{price}€*\n"
-        f"Variation 1j : {change_1d:+.2f}%\n"
-        f"Depuis PRU ({pru}€) : *{pct:+.2f}%*\n\n"
-    )
+    msg = f"{emoji} *Amundi PEA Monde*\n\nPrix : *{price}€*\nVariation 1j : {change_1d:+.2f}%\nDepuis PRU ({pru}€) : *{pct:+.2f}%*\n\n"
     msg += f"{label}\n{action}" if label else "✅ Pas d'opportunité — DCA mensuel suffit"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -306,26 +273,21 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_parts, total_investi, pru = calcul_portefeuille(data)
     price, _ = get_etf_price()
     if price is None:
-        await update.message.reply_text("❌ Impossible de récupérer le cours.")
+        await update.message.reply_text("❌ Cours indisponible.")
         return
     valeur = round(price * total_parts, 2)
     pv = round(valeur - total_investi, 2)
     pct = round(((price - pru) / pru) * 100, 2) if pru else 0
     emoji = "📈" if pct >= 0 else "📉"
-    msg = (
+    await update.message.reply_text(
         f"💼 *Ton PEA — {datetime.now(PARIS_TZ).strftime('%d/%m/%Y')}*\n\n"
-        f"Parts : *{total_parts}*\n"
-        f"Prix actuel : *{price}€*\n"
-        f"Prix de revient : {pru}€\n"
-        f"Variation : {emoji} *{pct:+.2f}%*\n\n"
-        f"Total investi : {round(total_investi, 2)}€\n"
-        f"Valeur actuelle : *{valeur}€*\n"
-        f"Plus-value latente : *{pv:+.2f}€*"
+        f"Parts : *{total_parts}*\nPrix actuel : *{price}€*\nPRU : {pru}€\nVariation : {emoji} *{pct:+.2f}%*\n\n"
+        f"Investi : {round(total_investi, 2)}€\nValeur : *{valeur}€*\nPV latente : *{pv:+.2f}€*",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_patrimoine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Récupération des prix en cours...")
+    await update.message.reply_text("⏳ Récupération des prix...")
     data = load_data()
     total_parts, total_investi, pru = calcul_portefeuille(data)
     price, _ = get_etf_price()
@@ -333,32 +295,23 @@ async def cmd_patrimoine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     crypto_total, crypto_details = calcul_crypto(crypto_prices)
     livreta = data.get("livreta", 0)
     if price is None:
-        await update.message.reply_text("❌ Impossible de récupérer les prix.")
+        await update.message.reply_text("❌ Cours ETF indisponible.")
         return
     valeur_pea = round(price * total_parts, 2)
     pv_pea = round(valeur_pea - total_investi, 2)
     pct_pea = round(((price - pru) / pru) * 100, 2) if pru else 0
     total_patrimoine = round(valeur_pea + livreta + crypto_total, 2)
     emoji_pea = "📈" if pct_pea >= 0 else "📉"
-    crypto_lines = ""
-    for c in crypto_details:
-        crypto_lines += f"  • {c['symbol']} : {c['valeur']}€\n"
-    msg = (
+    crypto_lines = "".join(f"  • {c['symbol']} : {c['valeur']}€\n" for c in crypto_details)
+    await update.message.reply_text(
         f"💰 *TON PATRIMOINE — {datetime.now(PARIS_TZ).strftime('%d/%m/%Y')}*\n\n"
-        f"📈 *PEA Boursorama*\n"
-        f"Amundi PEA Monde — {total_parts} parts\n"
-        f"Valeur : *{valeur_pea}€* {emoji_pea} {pct_pea:+.2f}%\n"
-        f"Plus-value latente : *{pv_pea:+.2f}€*\n\n"
-        f"🏦 *Livret A*\n"
-        f"Solde : *{livreta}€*\n\n"
-        f"₿ *Cryptos Coinbase*\n"
-        f"Total : *{crypto_total}€*\n"
-        f"{crypto_lines}\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"💼 *TOTAL PATRIMOINE*\n"
-        f"*{total_patrimoine}€*"
+        f"📈 *PEA Boursorama*\nAmundi PEA Monde — {total_parts} parts\n"
+        f"Valeur : *{valeur_pea}€* {emoji_pea} {pct_pea:+.2f}%\nPV latente : *{pv_pea:+.2f}€*\n\n"
+        f"🏦 *Livret A*\nSolde : *{livreta}€*\n\n"
+        f"₿ *Cryptos Coinbase*\nTotal : *{crypto_total}€*\n{crypto_lines}\n"
+        f"━━━━━━━━━━━━━━━━━\n💼 *TOTAL PATRIMOINE*\n*{total_patrimoine}€*",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_historique(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
@@ -370,8 +323,7 @@ async def cmd_historique(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for a in achats:
         lines.append(f"• {a['date']} — {a['parts']} parts @ {a['prix']}€ = {a['montant']}€")
     total_parts, total_investi, pru = calcul_portefeuille(data)
-    lines.append(f"\n*Total : {total_parts} parts — {round(total_investi, 2)}€ investis*")
-    lines.append(f"*PRU : {pru}€*")
+    lines.append(f"\n*Total : {total_parts} parts — {round(total_investi, 2)}€*\n*PRU : {pru}€*")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_achat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -389,12 +341,8 @@ async def cmd_achat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(data)
         total_parts, total_investi, pru = calcul_portefeuille(data)
         await update.message.reply_text(
-            f"✅ *Achat enregistré*\n\n"
-            f"{parts} parts @ {prix}€ = {montant}€\n\n"
-            f"*Portefeuille mis à jour :*\n"
-            f"Total parts : {total_parts}\n"
-            f"Total investi : {round(total_investi, 2)}€\n"
-            f"Nouveau PRU : {pru}€",
+            f"✅ *Achat enregistré*\n\n{parts} parts @ {prix}€ = {montant}€\n\n"
+            f"Total parts : {total_parts}\nTotal investi : {round(total_investi, 2)}€\nNouv. PRU : {pru}€",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -410,31 +358,27 @@ async def cmd_livreta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_data()
         data["livreta"] = montant
         save_data(data)
-        await update.message.reply_text(
-            f"✅ *Livret A mis à jour*\n\nSolde : *{montant}€*",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ *Livret A mis à jour*\n\nSolde : *{montant}€*", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {e}")
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
+    await update.message.reply_text(
         "🤖 *PEA Tracker Bot*\n\n"
         "📊 *Suivi*\n"
-        "/patrimoine — Vue complète de tout ton patrimoine\n"
-        "/cours — Prix ETF + signal opportunité\n"
-        "/status — Détail du PEA\n"
-        "/historique — Tous tes achats ETF\n\n"
+        "/patrimoine — Vue complète du patrimoine\n"
+        "/cours — Prix ETF + signal\n"
+        "/status — Détail PEA\n"
+        "/historique — Tous les achats\n\n"
         "✏️ *Mettre à jour*\n"
-        "/achat <parts> <prix> — Enregistrer un achat ETF\n"
-        "/livreta <montant> — Mettre à jour le Livret A\n\n"
-        "🔔 *Alertes automatiques*\n"
-        f"ETF : notification si baisse ≥ {ALERT_THRESHOLD}% du PRU\n"
-        "BTC : notification si prix < 50 000€ ou < 40 000€\n\n"
-        "_Vérification auto toutes les heures_\n"
-        "_Résumé chaque lundi à 8h_"
+        "/achat <parts> <prix>\n"
+        "/livreta <montant>\n\n"
+        "🔔 *Alertes auto toutes les heures*\n"
+        f"ETF : baisse ≥ {ALERT_THRESHOLD}% du PRU\n"
+        "BTC : prix < 50k€ ou < 40k€\n\n"
+        "_Résumé chaque lundi à 8h_",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
