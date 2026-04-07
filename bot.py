@@ -12,7 +12,6 @@ CHAT_ID = int(os.environ.get("CHAT_ID"))
 ALERT_THRESHOLD = float(os.environ.get("ALERT_THRESHOLD", "-10"))
 JSONBIN_KEY = os.environ.get("JSONBIN_KEY")
 JSONBIN_BIN_ID = os.environ.get("JSONBIN_BIN_ID")
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
 PARIS_TZ = pytz.timezone("Europe/Paris")
 
 logging.basicConfig(level=logging.INFO)
@@ -181,58 +180,88 @@ def days_until_next_month():
     return (nxt - now).days
 
 
-# ─── Flash info ───────────────────────────────────────────────────────────────
+# ─── Flash info via RSS ───────────────────────────────────────────────────────
+
+RSS_FEEDS = {
+    "marches": [
+        "https://feeds.reuters.com/reuters/businessNews",
+        "https://www.lesechos.fr/rss/rss_marches.xml",
+    ],
+    "monde": [
+        "https://feeds.bbci.co.uk/news/world/rss.xml",
+        "https://feeds.reuters.com/Reuters/worldNews",
+    ],
+    "crypto": [
+        "https://feeds.reuters.com/reuters/technologyNews",
+        "https://www.lesechos.fr/rss/rss_finance.xml",
+    ],
+}
+
+def fetch_rss(url, max_items=3):
+    """Récupère les titres d'un flux RSS."""
+    try:
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(r.content)
+        items = root.findall(".//item")
+        titles = []
+        for item in items[:max_items]:
+            title = item.find("title")
+            if title is not None and title.text:
+                titles.append(title.text.strip())
+        return titles
+    except Exception as e:
+        logger.error(f"Erreur RSS {url}: {e}")
+        return []
 
 def generate_flash_info():
     try:
         from deep_translator import GoogleTranslator
         today = datetime.now(PARIS_TZ).strftime("%d/%m/%Y")
-        translator = GoogleTranslator(source="en", target="fr")
+        translator = GoogleTranslator(source="auto", target="fr")
 
-        def fetch_news(query):
-            r = requests.get(
-                "https://newsapi.org/v2/everything",
-                params={
-                    "q": query,
-                    "language": "en",
-                    "sortBy": "publishedAt",
-                    "pageSize": 5,
-                    "apiKey": NEWS_API_KEY
-                },
-                timeout=10
-            )
-            articles = r.json().get("articles", [])
-            # Filtre les sources non financières connues
-            excluded = ["pypi", "github", "reddit", "stackoverflow", "medium.com"]
-            titles = [
-                a["title"] for a in articles
-                if a.get("title") and not any(x in (a.get("url") or "").lower() for x in excluded)
-            ]
-            translated = []
-            for t in titles:
-                try:
-                    translated.append(translator.translate(t[:400]))
-                except:
-                    translated.append(t)
-            return translated
+        def translate(text):
+            try:
+                return translator.translate(text[:400])
+            except:
+                return text
 
-        marches = fetch_news('"stock market" OR "S&P 500" OR "CAC 40" recession')
-        actu = fetch_news('"Trump" "tariffs" OR "trade war"')
-        bitcoin = fetch_news('"Bitcoin" price')
+        # Récupère les news depuis les flux RSS
+        marches_titles = []
+        for url in RSS_FEEDS["marches"]:
+            marches_titles += fetch_rss(url, 2)
+            if len(marches_titles) >= 3:
+                break
+
+        monde_titles = []
+        for url in RSS_FEEDS["monde"]:
+            monde_titles += fetch_rss(url, 2)
+            if len(monde_titles) >= 2:
+                break
+
+        crypto_titles = []
+        for url in RSS_FEEDS["crypto"]:
+            t = fetch_rss(url, 3)
+            # Filtre sur les titres contenant crypto/bitcoin/finance
+            filtered = [x for x in t if any(k in x.lower() for k in ["bitcoin", "crypto", "bourse", "marché", "finance", "wall street", "cac", "nasdaq"])]
+            crypto_titles += filtered
+            if len(crypto_titles) >= 2:
+                break
 
         lines = [f"📰 *FLASH MARCHÉS — {today}*\n"]
 
-        lines.append("📊 *Marchés mondiaux*")
-        for title in marches[:2]:
-            lines.append(f"• {title[:120]}")
+        lines.append("📊 *Marchés & Économie*")
+        for title in marches_titles[:2]:
+            lines.append(f"• {translate(title)[:120]}")
 
-        lines.append("\n🌍 *Actu clé*")
-        for title in actu[:1]:
-            lines.append(f"• {title[:120]}")
+        lines.append("\n🌍 *Actu mondiale*")
+        for title in monde_titles[:2]:
+            lines.append(f"• {translate(title)[:120]}")
 
-        lines.append("\n₿ *Bitcoin*")
-        for title in bitcoin[:2]:
-            lines.append(f"• {title[:120]}")
+        if crypto_titles:
+            lines.append("\n₿ *Crypto & Finance*")
+            for title in crypto_titles[:1]:
+                lines.append(f"• {translate(title)[:120]}")
 
         lines.append("\n💡 *Rappel*")
         lines.append("_Les news du jour n'affectent pas ta stratégie DCA long terme._")
