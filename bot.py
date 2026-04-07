@@ -196,14 +196,14 @@ def generate_flash_info():
                     "q": query,
                     "language": "en",
                     "sortBy": "publishedAt",
-                    "pageSize": 3,
+                    "pageSize": 5,
+                    "sources": "reuters,bloomberg,financial-times,the-wall-street-journal,cnbc,bbc-news",
                     "apiKey": NEWS_API_KEY
                 },
                 timeout=10
             )
             articles = r.json().get("articles", [])
             titles = [a["title"] for a in articles if a.get("title")]
-            # Traduction en français
             translated = []
             for t in titles:
                 try:
@@ -212,9 +212,9 @@ def generate_flash_info():
                     translated.append(t)
             return translated
 
-        marches = fetch_news("stock market S&P500 CAC40 economy")
-        actu = fetch_news("Trump tariffs trade war economy")
-        bitcoin = fetch_news("Bitcoin price crypto")
+        marches = fetch_news("stock market economy recession")
+        actu = fetch_news("Trump tariffs trade")
+        bitcoin = fetch_news("Bitcoin cryptocurrency")
 
         lines = [f"📰 *FLASH MARCHÉS — {today}*\n"]
 
