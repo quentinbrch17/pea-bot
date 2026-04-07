@@ -185,28 +185,51 @@ def days_until_next_month():
 
 def generate_flash_info():
     try:
+        from deep_translator import GoogleTranslator
         today = datetime.now(PARIS_TZ).strftime("%d/%m/%Y")
+        translator = GoogleTranslator(source="en", target="fr")
 
-        def fetch_news(query, language="fr"):
+        def fetch_news(query):
             r = requests.get(
                 "https://newsapi.org/v2/everything",
-                params={"q": query, "language": language, "sortBy": "publishedAt", "pageSize": 3, "apiKey": NEWS_API_KEY},
+                params={
+                    "q": query,
+                    "language": "en",
+                    "sortBy": "publishedAt",
+                    "pageSize": 3,
+                    "apiKey": NEWS_API_KEY
+                },
                 timeout=10
             )
             articles = r.json().get("articles", [])
-            return [a["title"] for a in articles if a.get("title")]
+            titles = [a["title"] for a in articles if a.get("title")]
+            # Traduction en français
+            translated = []
+            for t in titles:
+                try:
+                    translated.append(translator.translate(t[:400]))
+                except:
+                    translated.append(t)
+            return translated
 
-        marches = fetch_news("bourse CAC40 marchés financiers", "fr")
-        monde = fetch_news("MSCI World S&P500 markets", "en")
-        bitcoin = fetch_news("Bitcoin crypto", "fr")
+        marches = fetch_news("stock market S&P500 CAC40 economy")
+        actu = fetch_news("Trump tariffs trade war economy")
+        bitcoin = fetch_news("Bitcoin price crypto")
 
         lines = [f"📰 *FLASH MARCHÉS — {today}*\n"]
-        lines.append("📊 *Marchés*")
-        for title in (marches + monde)[:3]:
-            lines.append(f"• {title[:90]}")
+
+        lines.append("📊 *Marchés mondiaux*")
+        for title in marches[:2]:
+            lines.append(f"• {title[:120]}")
+
+        lines.append("\n🌍 *Actu clé*")
+        for title in actu[:1]:
+            lines.append(f"• {title[:120]}")
+
         lines.append("\n₿ *Bitcoin*")
         for title in bitcoin[:2]:
-            lines.append(f"• {title[:90]}")
+            lines.append(f"• {title[:120]}")
+
         lines.append("\n💡 *Rappel*")
         lines.append("_Les news du jour n'affectent pas ta stratégie DCA long terme._")
 
