@@ -52,8 +52,7 @@ BTC_ALERT_LEVELS = [
 def default_data():
     return {
         "achats": [
-            {"date": "06/04/2026", "parts": 92, "prix": 5.359, "montant": 493.03},
-            {"date": "06/04/2026", "parts": 618, "prix": 5.359, "montant": 3311.86},
+            {"date": "06/04/2026", "parts": 710, "prix": 5.55, "montant": 3940.5}
         ],
         "livreta": 10000.11
     }
@@ -94,22 +93,17 @@ def calcul_portefeuille(data):
     return total_parts, total_investi, pru
 
 
-# ─── Prix ETF via Yahoo Finance Chart API ────────────────────────────────────
+# ─── Prix ETF ─────────────────────────────────────────────────────────────────
 
 def get_etf_price():
-    """Récupère le cours via l'API Chart de Yahoo Finance — plus fiable depuis les serveurs cloud."""
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/DCAM.PA"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
-        }
-        params = {"interval": "1d", "range": "5d"}
-        r = requests.get(url, headers=headers, params=params, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get(url, headers=headers, params={"interval": "1d", "range": "5d"}, timeout=10)
         data = r.json()
         closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
         closes = [c for c in closes if c is not None]
-        if len(closes) < 1:
+        if not closes:
             return None, None
         price = round(closes[-1], 4)
         prev = round(closes[-2], 4) if len(closes) > 1 else price
@@ -187,6 +181,41 @@ def days_until_next_month():
     return (nxt - now).days
 
 
+# ─── Flash info ───────────────────────────────────────────────────────────────
+
+def generate_flash_info():
+    try:
+        today = datetime.now(PARIS_TZ).strftime("%d/%m/%Y")
+
+        def fetch_news(query, language="fr"):
+            r = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={"q": query, "language": language, "sortBy": "publishedAt", "pageSize": 3, "apiKey": NEWS_API_KEY},
+                timeout=10
+            )
+            articles = r.json().get("articles", [])
+            return [a["title"] for a in articles if a.get("title")]
+
+        marches = fetch_news("bourse CAC40 marchés financiers", "fr")
+        monde = fetch_news("MSCI World S&P500 markets", "en")
+        bitcoin = fetch_news("Bitcoin crypto", "fr")
+
+        lines = [f"📰 *FLASH MARCHÉS — {today}*\n"]
+        lines.append("📊 *Marchés*")
+        for title in (marches + monde)[:3]:
+            lines.append(f"• {title[:90]}")
+        lines.append("\n₿ *Bitcoin*")
+        for title in bitcoin[:2]:
+            lines.append(f"• {title[:90]}")
+        lines.append("\n💡 *Rappel*")
+        lines.append("_Les news du jour n'affectent pas ta stratégie DCA long terme._")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Erreur flash info: {e}")
+        return None
+
+
 # ─── Jobs automatiques ────────────────────────────────────────────────────────
 
 async def check_price(context: ContextTypes.DEFAULT_TYPE):
@@ -252,6 +281,11 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def daily_flash(context: ContextTypes.DEFAULT_TYPE):
+    flash = generate_flash_info()
+    if flash:
+        await context.bot.send_message(chat_id=CHAT_ID, text=flash, parse_mode="Markdown")
+
 
 # ─── Commandes ────────────────────────────────────────────────────────────────
 
@@ -260,7 +294,7 @@ async def cmd_cours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, _, pru = calcul_portefeuille(data)
     price, change_1d = get_etf_price()
     if price is None:
-        await update.message.reply_text("❌ Cours indisponible pour l'instant (marché fermé ou API indisponible).")
+        await update.message.reply_text("❌ Cours indisponible (marché fermé ou API indisponible).")
         return
     pct = round(((price - pru) / pru) * 100, 2) if pru else 0
     level, label, action = get_alert_level_etf(pct)
@@ -349,69 +383,7 @@ async def cmd_achat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {e}")
 
-async def generate_flash_info():
-    """Génère un flash info marché via NewsAPI."""
-    try:
-        today = datetime.now(PARIS_TZ).strftime("%d/%m/%Y")
-
-        # Récupère les news marchés et crypto
-        def fetch_news(query, language="fr"):
-            r = requests.get(
-                "https://newsapi.org/v2/everything",
-                params={
-                    "q": query,
-                    "language": language,
-                    "sortBy": "publishedAt",
-                    "pageSize": 3,
-                    "apiKey": NEWS_API_KEY
-                },
-                timeout=10
-            )
-            articles = r.json().get("articles", [])
-            return [a["title"] for a in articles if a.get("title")]
-
-        marches = fetch_news("bourse CAC40 marchés financiers", "fr")
-        monde = fetch_news("MSCI World S&P500 markets economy", "en")
-        bitcoin = fetch_news("Bitcoin crypto", "fr")
-
-        # Construction du message
-        lines = [f"📰 *FLASH MARCHÉS — {today}*\n"]
-
-        lines.append("📊 *Marchés*")
-        for title in (marches + monde)[:3]:
-            lines.append(f"• {title[:80]}...")
-
-        lines.append("\n₿ *Bitcoin*")
-        for title in bitcoin[:2]:
-            lines.append(f"• {title[:80]}...")
-
-        lines.append("\n💡 *Rappel stratégie*")
-        lines.append("_Les news quotidiennes n'affectent pas ta stratégie DCA long terme. Continue ton versement mensuel._")
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        logger.error(f"Erreur flash info: {e}")
-        return None
-
-async def daily_flash(context: ContextTypes.DEFAULT_TYPE):
-    """Envoie le flash info quotidien."""
-    flash = await generate_flash_info()
-    if flash:
-        await context.bot.send_message(chat_id=CHAT_ID, text=flash, parse_mode="Markdown")
-    else:
-        await context.bot.send_message(chat_id=CHAT_ID, text="❌ Flash info indisponible aujourd'hui.")
-
-async def cmd_flash(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/flash — génère le flash info à la demande."""
-    await update.message.reply_text("⏳ Génération du flash info en cours...")
-    flash = await generate_flash_info()
-    if flash:
-        await update.message.reply_text(flash, parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ Flash info indisponible pour l'instant.")
-
-
+async def cmd_livreta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
         if len(args) != 1:
@@ -425,6 +397,14 @@ async def cmd_flash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {e}")
 
+async def cmd_flash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Récupération des news...")
+    flash = generate_flash_info()
+    if flash:
+        await update.message.reply_text(flash, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Flash info indisponible pour l'instant.")
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *PEA Tracker Bot*\n\n"
@@ -436,12 +416,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✏️ *Mettre à jour*\n"
         "/achat <parts> <prix>\n"
         "/livreta <montant>\n\n"
+        "📰 *Flash info*\n"
+        "/flash — Flash marchés à la demande\n"
+        "_Flash auto lun-ven à 8h30_\n\n"
         "🔔 *Alertes auto toutes les heures*\n"
         f"ETF : baisse ≥ {ALERT_THRESHOLD}% du PRU\n"
         "BTC : prix < 50k€ ou < 40k€\n\n"
-        "📰 *Flash info*\n"
-        "/flash — Flash marchés à la demande\n"
-        "_Flash auto chaque matin à 8h30 (lun-ven)_\n\n"
         "_Résumé patrimoine chaque lundi à 8h_",
         parse_mode="Markdown"
     )
