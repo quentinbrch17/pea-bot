@@ -12,6 +12,7 @@ CHAT_ID = int(os.environ.get("CHAT_ID"))
 ALERT_THRESHOLD = float(os.environ.get("ALERT_THRESHOLD", "-10"))
 JSONBIN_KEY = os.environ.get("JSONBIN_KEY")
 JSONBIN_BIN_ID = os.environ.get("JSONBIN_BIN_ID")
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
 PARIS_TZ = pytz.timezone("Europe/Paris")
 
 logging.basicConfig(level=logging.INFO)
@@ -348,7 +349,69 @@ async def cmd_achat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {e}")
 
-async def cmd_livreta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def generate_flash_info():
+    """Génère un flash info marché via NewsAPI."""
+    try:
+        today = datetime.now(PARIS_TZ).strftime("%d/%m/%Y")
+
+        # Récupère les news marchés et crypto
+        def fetch_news(query, language="fr"):
+            r = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q": query,
+                    "language": language,
+                    "sortBy": "publishedAt",
+                    "pageSize": 3,
+                    "apiKey": NEWS_API_KEY
+                },
+                timeout=10
+            )
+            articles = r.json().get("articles", [])
+            return [a["title"] for a in articles if a.get("title")]
+
+        marches = fetch_news("bourse CAC40 marchés financiers", "fr")
+        monde = fetch_news("MSCI World S&P500 markets economy", "en")
+        bitcoin = fetch_news("Bitcoin crypto", "fr")
+
+        # Construction du message
+        lines = [f"📰 *FLASH MARCHÉS — {today}*\n"]
+
+        lines.append("📊 *Marchés*")
+        for title in (marches + monde)[:3]:
+            lines.append(f"• {title[:80]}...")
+
+        lines.append("\n₿ *Bitcoin*")
+        for title in bitcoin[:2]:
+            lines.append(f"• {title[:80]}...")
+
+        lines.append("\n💡 *Rappel stratégie*")
+        lines.append("_Les news quotidiennes n'affectent pas ta stratégie DCA long terme. Continue ton versement mensuel._")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"Erreur flash info: {e}")
+        return None
+
+async def daily_flash(context: ContextTypes.DEFAULT_TYPE):
+    """Envoie le flash info quotidien."""
+    flash = await generate_flash_info()
+    if flash:
+        await context.bot.send_message(chat_id=CHAT_ID, text=flash, parse_mode="Markdown")
+    else:
+        await context.bot.send_message(chat_id=CHAT_ID, text="❌ Flash info indisponible aujourd'hui.")
+
+async def cmd_flash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/flash — génère le flash info à la demande."""
+    await update.message.reply_text("⏳ Génération du flash info en cours...")
+    flash = await generate_flash_info()
+    if flash:
+        await update.message.reply_text(flash, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Flash info indisponible pour l'instant.")
+
+
     try:
         args = context.args
         if len(args) != 1:
@@ -376,7 +439,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔔 *Alertes auto toutes les heures*\n"
         f"ETF : baisse ≥ {ALERT_THRESHOLD}% du PRU\n"
         "BTC : prix < 50k€ ou < 40k€\n\n"
-        "_Résumé chaque lundi à 8h_",
+        "📰 *Flash info*\n"
+        "/flash — Flash marchés à la demande\n"
+        "_Flash auto chaque matin à 8h30 (lun-ven)_\n\n"
+        "_Résumé patrimoine chaque lundi à 8h_",
         parse_mode="Markdown"
     )
 
@@ -393,9 +459,11 @@ def main():
     app.add_handler(CommandHandler("historique", cmd_historique))
     app.add_handler(CommandHandler("achat", cmd_achat))
     app.add_handler(CommandHandler("livreta", cmd_livreta))
+    app.add_handler(CommandHandler("flash", cmd_flash))
     jq = app.job_queue
     jq.run_repeating(check_price, interval=3600, first=30)
     jq.run_daily(weekly_summary, time=time(8, 0, tzinfo=PARIS_TZ), days=(0,))
+    jq.run_daily(daily_flash, time=time(8, 30, tzinfo=PARIS_TZ), days=(0, 1, 2, 3, 4))
     logger.info("Bot démarré ✅")
     app.run_polling(drop_pending_updates=True)
 
