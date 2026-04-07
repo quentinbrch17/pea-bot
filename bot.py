@@ -184,16 +184,18 @@ def days_until_next_month():
 
 RSS_FEEDS = {
     "marches": [
-        "https://feeds.reuters.com/reuters/businessNews",
         "https://www.lesechos.fr/rss/rss_marches.xml",
+        "https://www.boursorama.com/bourse/actualites/rss/marches",
+        "https://feeds.feedburner.com/CafedelaBourse",
     ],
     "monde": [
         "https://feeds.bbci.co.uk/news/world/rss.xml",
-        "https://feeds.reuters.com/Reuters/worldNews",
+        "https://www.lemonde.fr/rss/une.xml",
+        "https://www.liberation.fr/arc/outboundfeeds/rss/?outputType=xml",
     ],
     "crypto": [
-        "https://feeds.reuters.com/reuters/technologyNews",
         "https://www.lesechos.fr/rss/rss_finance.xml",
+        "https://feeds.bbci.co.uk/news/business/rss.xml",
     ],
 }
 
@@ -241,12 +243,22 @@ def generate_flash_info():
 
         crypto_titles = []
         for url in RSS_FEEDS["crypto"]:
-            t = fetch_rss(url, 3)
-            # Filtre sur les titres contenant crypto/bitcoin/finance
-            filtered = [x for x in t if any(k in x.lower() for k in ["bitcoin", "crypto", "bourse", "marché", "finance", "wall street", "cac", "nasdaq"])]
+            t = fetch_rss(url, 4)
+            filtered = [x for x in t if any(k in x.lower() for k in [
+                "bitcoin", "crypto", "bourse", "marché", "finance",
+                "wall street", "cac", "nasdaq", "s&p", "dow", "recession",
+                "économie", "economy", "market", "stock", "trade", "tariff"
+            ])]
             crypto_titles += filtered
             if len(crypto_titles) >= 2:
                 break
+        # Fallback si rien trouvé
+        if not crypto_titles:
+            for url in RSS_FEEDS["marches"]:
+                t = fetch_rss(url, 2)
+                if t:
+                    crypto_titles = t
+                    break
 
         lines = [f"📰 *FLASH MARCHÉS — {today}*\n"]
 
